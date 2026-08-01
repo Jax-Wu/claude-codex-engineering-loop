@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "engineering-loop",
   "displayName": "Claude–Codex Engineering Loop",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Claude plans, Codex implements, Claude reviews, and Codex repairs in a bounded, recoverable loop.",
   "author": {
     "name": "Engineering Loop Maintainers"
