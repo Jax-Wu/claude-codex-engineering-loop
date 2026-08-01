@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "requireCleanWorktree": true,
+  "maxFixRounds": 3,
+  "planApproval": "risk-based",
+  "blockOnSeverity": "high",
+  "codex": {
+    "resume": true,
+    "sandbox": "workspace-write"
+  },
+  "gates": [
+    {
+      "name": "typecheck",
+      "command": [
+        "npm",
+        "run",
+        "typecheck"
+      ],
+      "timeoutSeconds": 300,
+      "required": true
+    },
+    {
+      "name": "test",
+      "command": [
+        "npm",
+        "test"
+      ],
+      "timeoutSeconds": 900,
+      "required": true
+    }
+  ],
+  "limits": {
+    "maxChangedFiles": 30,
+    "maxDiffLines": 2500,
+    "maxPatchBytes": 1000000
+  }
+}

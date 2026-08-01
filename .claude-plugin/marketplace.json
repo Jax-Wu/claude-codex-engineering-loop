@@ -1,0 +1,28 @@
+{
+  "name": "engineering-loop-local",
+  "owner": {
+    "name": "Engineering Loop Maintainers"
+  },
+  "description": "Local marketplace for the Claude-to-Codex engineering loop",
+  "allowCrossMarketplaceDependenciesOn": [
+    "openai-codex"
+  ],
+  "plugins": [
+    {
+      "name": "engineering-loop",
+      "source": "./plugins/engineering-loop",
+      "description": "Claude plans, Codex implements, Claude reviews, and Codex repairs in a bounded loop",
+      "version": "0.1.0",
+      "author": {
+        "name": "Engineering Loop Maintainers"
+      },
+      "category": "development",
+      "tags": [
+        "claude-code",
+        "codex",
+        "workflow",
+        "review"
+      ]
+    }
+  ]
+}

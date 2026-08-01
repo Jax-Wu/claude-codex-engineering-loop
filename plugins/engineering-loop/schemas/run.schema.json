@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Engineering Loop Run",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "runId",
+    "goal",
+    "profile",
+    "status",
+    "baseCommit",
+    "maxFixRounds",
+    "fixRound",
+    "runDir",
+    "codex",
+    "artifacts",
+    "events"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "runId": {
+      "type": "string",
+      "pattern": "^el-"
+    },
+    "goal": {
+      "type": "string",
+      "minLength": 1
+    },
+    "profile": {
+      "enum": [
+        "fast",
+        "standard",
+        "strict"
+      ]
+    },
+    "status": {
+      "enum": [
+        "PREFLIGHT",
+        "PLANNING",
+        "PLAN_APPROVAL",
+        "EXECUTING",
+        "VERIFYING",
+        "REVIEWING",
+        "FIXING",
+        "HUMAN_REQUIRED",
+        "DONE",
+        "CANCELLED",
+        "FAILED"
+      ]
+    },
+    "baseCommit": {
+      "type": "string",
+      "minLength": 1
+    },
+    "maxFixRounds": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "fixRound": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "runDir": {
+      "type": "string",
+      "minLength": 1
+    },
+    "codex": {
+      "type": "object"
+    },
+    "artifacts": {
+      "type": "object"
+    },
+    "events": {
+      "type": "array"
+    }
+  }
+}
