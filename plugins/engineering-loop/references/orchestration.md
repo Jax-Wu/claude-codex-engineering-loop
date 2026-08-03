@@ -42,18 +42,35 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/controller.mjs" executor-packet --cwd "$PWD"
 ```
 
 2. Read the returned packet.
-3. Invoke the `codex:codex-rescue` custom agent with this task:
+3. Dispatch it through the native detached companion:
 
-```text
---wait --fresh
-<entire executor packet>
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-dispatch.mjs" dispatch --cwd "$PWD" --mode fresh --prompt-file "<executorPacketPath>"
 ```
 
-The `--wait` and `--fresh` tokens are routing controls for the official agent. Do not call raw Codex CLI or app-server commands.
+Record the returned `jobId`, `threadId`, `turnId`, and receipt path. Before returning, the helper atomically stores the exact mapping under `~/.codex/engineering-loop/receipts`, outside companion-managed state. The helper uses the official companion's background mode; do not call raw Codex CLI or app-server commands. A foreground `--wait` is stripped before it reaches the companion and only exposes the reader to a 10-minute kill.
 
-4. If the agent returns no usable result or reports an invocation failure, mark `HUMAN_REQUIRED`.
-5. Write the agent's exact result to `current.executionReportPath` from controller status.
-6. Run `execution-complete` with that report path.
+Before dispatch, choose model and effort according to the executor contract's [Model and effort](executor-contract.md#model-and-effort) guidance. If either setting is omitted, it inherits the machine's global Codex configuration.
+
+4. Poll with short calls until the exit code reports a terminal job:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-dispatch.mjs" poll --job "<jobId>"
+```
+
+Exit `3` means the job is still active, exit `4` means to follow stalled-job recovery below, exit `5` means the job is terminal without a result, and exit `0` means the companion recorded completion.
+
+5. Retrieve the report:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-dispatch.mjs" result --job "<jobId>"
+```
+
+`result` exits `0` only with a usable report. It exits `5` with `report: null` for an unknown, missing, or ambiguous recovery target; exit `2` is a usage error.
+
+6. If neither the companion nor exact rollout recovery returns a usable `report`, mark `HUMAN_REQUIRED`.
+7. Write the exact `report` string to `current.executionReportPath` from controller status.
+8. Run `execution-complete` with that report path and the returned job and thread IDs.
 
 ## FIXING
 
@@ -63,17 +80,31 @@ The `--wait` and `--fresh` tokens are routing controls for the official agent. D
 node "${CLAUDE_PLUGIN_ROOT}/scripts/controller.mjs" executor-packet --cwd "$PWD" --mode fix
 ```
 
-2. Invoke `codex:codex-rescue` with:
+2. Dispatch the complete fix packet as a fresh detached job:
 
-```text
---wait --resume
-<entire fix packet>
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-dispatch.mjs" dispatch --cwd "$PWD" --mode fresh --prompt-file "<fixPacketPath>"
 ```
 
-The explicit continuation language and `--resume` routing control tell the official wrapper to use its latest Codex task for this repository.
+The fix packet and current worktree provide the continuation context. Never use `--resume` after an interruption or cancel: it yields `thread not found` and stalls at phase `starting`.
 
-3. Write the exact result to `current.executionReportPath`.
-4. Run `execution-complete`.
+3. Poll the job and retrieve its result with the same `poll` and `result` commands used in `EXECUTING`.
+4. Write the exact returned `report` string to `current.executionReportPath`.
+5. Run `execution-complete` with the returned job and thread IDs.
+
+### Stalled-job recovery
+
+Do not cancel a job merely because its log stopped. Use the log's last-event timestamp as the liveness signal: healthy turns have observed gaps no longer than about 69 seconds, while more than 120 seconds at phase `running` means "no reader attached," not "dead."
+
+Before cancelling, run `result --job <id>`. It checks companion state, then the independently stored receipt, and uses the exact thread and turn mapping to find `payload.type == "task_complete"` in the rollout. The returned `payload.last_agent_message` is the execution report.
+
+If the job state and receipt are both gone but the exact thread ID is known, run:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-dispatch.mjs" result --thread "<threadId>"
+```
+
+A rollout with multiple `task_complete` events is ambiguous without an exact turn ID; rerun with `--turn "<turnId>"`. A legacy job ID with neither state nor a receipt can only produce timestamp-based `discoveryHints` and always returns `report: null` with exit `5`. Use a hint only to locate identifiers for an explicit thread/turn request. Never select a report by job timestamp, repository/time proximity, or newest rollout. Only cancel after exact recovery confirms that no matching `task_complete` exists.
 
 ## VERIFYING
 
