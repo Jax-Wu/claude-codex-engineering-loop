@@ -44,13 +44,21 @@ installed — after a `codex` plugin update, or whenever the behaviour they add 
 appearing:
 
 ```bash
-npm run patch:check          # exit 0 iff installed and current
-node patches/openai-codex-1.0.4-stale-guard/apply.mjs --apply
+npm run patch:check              # every bundle; exit 0 iff all installed and current
+npm run patch:check -- --apply   # install whatever is missing
 ```
 
-Each patch directory has its own README explaining what it changes and why.
-Applying is gated on a sha256 match against the upstream baseline: if upstream
-moved, the script refuses rather than overwriting a newer file.
+Current bundles:
+
+- `openai-codex-1.0.4-stale-guard` — a companion job record that has stopped
+  being updated says so, instead of reporting `running` forever.
+- `openai-codex-1.0.4-state-integrity` — atomic state writes, a loud quarantine
+  instead of silently reading a corrupt file as empty, and a lock around
+  read-modify-write.
+
+Each directory has its own README explaining what it changes and why. Applying is
+gated on a sha256 match against the upstream baseline: if upstream moved, the
+script refuses rather than overwriting a newer file.
 
 ## Install in Claude Code Desktop
 

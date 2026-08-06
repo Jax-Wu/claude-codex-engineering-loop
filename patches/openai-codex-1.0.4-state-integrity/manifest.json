@@ -1,0 +1,18 @@
+{
+  "id": "openai-codex-1.0.4-state-integrity",
+  "target": {
+    "plugin": "codex@openai-codex",
+    "upstreamRepo": "openai/codex-plugin-cc",
+    "upstreamCommit": "807e03ac9d5aa23bc395fdec8c3767500a86b3cf",
+    "pluginVersion": "1.0.4",
+    "libDir": "scripts/lib"
+  },
+  "files": [
+    {
+      "name": "state.mjs",
+      "mode": "modify",
+      "baselineSha256": "eabfb53f0226791560cc9eb0dfc598e888107187dee64fef79ab3b2c6104faa0",
+      "patchedSha256": "f3cf3532f6074e067d93626632cd803db25799e416fa789a3e622e136eb3963e"
+    }
+  ]
+}
