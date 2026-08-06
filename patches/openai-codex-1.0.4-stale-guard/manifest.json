@@ -1,0 +1,29 @@
+{
+  "id": "openai-codex-1.0.4-stale-guard",
+  "target": {
+    "plugin": "codex@openai-codex",
+    "upstreamRepo": "openai/codex-plugin-cc",
+    "upstreamCommit": "807e03ac9d5aa23bc395fdec8c3767500a86b3cf",
+    "pluginVersion": "1.0.4",
+    "libDir": "scripts/lib"
+  },
+  "files": [
+    {
+      "name": "tracked-jobs.mjs",
+      "mode": "modify",
+      "baselineSha256": "e2ce2a2b32c9315665300c8d10279073e3268ce3b149320b2a9d90aef53a6e43",
+      "patchedSha256": "cf7a574a3f2af74ccef562e967b9c8ee95aa21f0d245fd1739d2016e6210a2b0"
+    },
+    {
+      "name": "render.mjs",
+      "mode": "modify",
+      "baselineSha256": "189e2e9a2179a40a35596629e4fff4ff2aed63db0ee2d7349e3d4c0b953ffb92",
+      "patchedSha256": "23da4cb5d34ec001171044521cbddc53f5f38ed7fbea3661eeab78b59ec628c2"
+    },
+    {
+      "name": "stale-jobs.mjs",
+      "mode": "add",
+      "patchedSha256": "19c7fc02aee48ac47b94324e1ffbefd48a5b3a3389117d081379ec9b24096094"
+    }
+  ]
+}

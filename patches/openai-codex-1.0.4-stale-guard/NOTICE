@@ -1,0 +1,14 @@
+This directory contains files from openai/codex-plugin-cc:
+
+    Copyright 2026 OpenAI
+    Licensed under the Apache License, Version 2.0
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Source: https://github.com/openai/codex-plugin-cc at commit
+807e03ac9d5aa23bc395fdec8c3767500a86b3cf (plugin version 1.0.4),
+paths plugins/codex/scripts/lib/{tracked-jobs.mjs,render.mjs}.
+
+baseline/  unmodified copies, byte-identical to that commit.
+patched/   modified copies. Changes are described in README.md and are
+           reproducible with `diff -u baseline/<f> patched/<f>`.
+           stale-jobs.mjs is new work, not derived from upstream.

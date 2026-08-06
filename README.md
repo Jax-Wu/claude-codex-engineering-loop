@@ -36,6 +36,22 @@ If `claude` is not available in the current shell, run the equivalent commands i
 /plugin validate /absolute/path/to/engineering-loop/plugins/engineering-loop
 ```
 
+## Local patches to the official Codex plugin
+
+`patches/` holds reviewed changes to files inside `~/.claude/plugins/cache/`, which
+Claude Code replaces wholesale on every plugin update. Check whether they are still
+installed — after a `codex` plugin update, or whenever the behaviour they add stops
+appearing:
+
+```bash
+npm run patch:check          # exit 0 iff installed and current
+node patches/openai-codex-1.0.4-stale-guard/apply.mjs --apply
+```
+
+Each patch directory has its own README explaining what it changes and why.
+Applying is gated on a sha256 match against the upstream baseline: if upstream
+moved, the script refuses rather than overwriting a newer file.
+
 ## Install in Claude Code Desktop
 
 Open a local Code session, then run:

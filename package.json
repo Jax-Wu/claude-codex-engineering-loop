@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "check": "node scripts/validate-package.mjs"
+    "check": "node scripts/validate-package.mjs",
+    "patch:check": "node patches/openai-codex-1.0.4-stale-guard/apply.mjs"
   },
   "engines": {
     "node": ">=18.18"
