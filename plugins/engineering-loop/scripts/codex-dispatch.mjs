@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   closeSync,
   existsSync,
@@ -17,7 +18,9 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
-const EXIT = Object.freeze({ ERROR: 1, USAGE: 2, ACTIVE: 3, DETACHED: 4, NO_RESULT: 5 });
+const EXIT = Object.freeze({
+  ERROR: 1, USAGE: 2, ACTIVE: 3, DETACHED: 4, NO_RESULT: 5, CONFLICT: 6,
+});
 const ACTIVE = new Set(["queued", "running"]);
 const SAFE_JOB_ID = /^[a-zA-Z0-9._-]+$/u;
 const TIMESTAMPED_JOB_ID = /^task-([a-z0-9]+)-[a-z0-9]+$/iu;
@@ -28,13 +31,19 @@ class UsageError extends Error {}
 
 function usage() {
   console.log(`Usage:
-  node scripts/codex-dispatch.mjs dispatch --cwd <repo> --mode fresh --prompt-file <path>
+  node scripts/codex-dispatch.mjs dispatch --cwd <repo> --mode fresh --prompt-file <path> --attempt <id>
   node scripts/codex-dispatch.mjs poll --job <id>
   node scripts/codex-dispatch.mjs result --job <id> [--turn <id>]
   node scripts/codex-dispatch.mjs result --thread <id> [--turn <id>]
+  node scripts/codex-dispatch.mjs lease --cwd <repo>
+  node scripts/codex-dispatch.mjs release --cwd <repo> [--attempt <id>]
+
+--attempt names the phase attempt, not the job. Re-dispatching the same attempt
+returns the job that already exists instead of starting a second one.
 
 Exit codes: 0 result recovered, 1 runtime error, 2 usage error,
-3 poll reports active, 4 poll reports likely detached, 5 no unambiguous result.`);
+3 poll reports active, 4 poll reports likely detached, 5 no unambiguous result,
+6 the workspace write lease is held by another attempt.`);
 }
 
 function parseArgs(argv) {
@@ -72,6 +81,11 @@ function print(value) {
 function noResult(value) {
   print({ source: null, report: null, ...value });
   process.exitCode = EXIT.NO_RESULT;
+}
+
+function conflict(value) {
+  print(value);
+  process.exitCode = EXIT.CONFLICT;
 }
 
 function findCompanion() {
@@ -261,6 +275,152 @@ function writeReceipt(receipt) {
   return destination;
 }
 
+// ---------------------------------------------------------------------------
+// Workspace write lease
+//
+// On 2026-08-03 a rescue agent's first `task` call timed out in the foreground,
+// so it issued a second fresh call. Both were write-capable against the same
+// worktree. The only thing forbidding that was a sentence in the rescue
+// contract; the companion happily starts a new job for every fresh request.
+//
+// A lease is one file per workspace naming the attempt that holds it. The claim
+// is an O_EXCL create, so it is a real mutual exclusion rather than a
+// read-then-write that two processes can both pass. Two separate protections
+// come out of it: re-dispatching the SAME attempt returns the job that already
+// exists (idempotence, for the retry that started this), and a DIFFERENT
+// attempt is refused while the held job is still alive (exclusion).
+//
+// Deliberately biased toward refusing. When the held job's fate cannot be
+// established -- state pruned, no recoverable rollout -- this refuses instead of
+// assuming the job died. Assuming death is precisely the 08-03 error, and here
+// it would cost interleaved edits from two writers rather than a wrong sentence
+// in a log.
+// ---------------------------------------------------------------------------
+
+function leasesDirectory() {
+  return resolve(
+    process.env.CODEX_DISPATCH_LEASES_DIR
+      ?? join(homedir(), ".codex", "engineering-loop", "leases"),
+  );
+}
+
+// Keyed by the resolved path, not the basename: two checkouts of one repo are
+// different worktrees and must not share a lease.
+function leasePath(workspace) {
+  const digest = createHash("sha256").update(resolve(workspace)).digest("hex").slice(0, 16);
+  return join(leasesDirectory(), `${digest}.json`);
+}
+
+function validateLease(value) {
+  if (
+    value?.schemaVersion !== 1
+    || typeof value.attempt !== "string" || value.attempt.length === 0
+    || typeof value.workspace !== "string" || value.workspace.length === 0
+    || (value.jobId !== null && !SAFE_JOB_ID.test(value.jobId ?? ""))
+    || !Number.isFinite(Date.parse(value.dispatchedAt ?? ""))
+  ) {
+    throw new Error("Lease is missing a valid attempt, workspace, job, or timestamp.");
+  }
+  return value;
+}
+
+function readLease(workspace) {
+  const file = leasePath(workspace);
+  if (!existsSync(file)) return { status: "missing", lease: null };
+  try {
+    return { status: "valid", lease: validateLease(JSON.parse(readFileSync(file, "utf8"))) };
+  } catch (error) {
+    return { status: "invalid", lease: null, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function serializeLease(lease) {
+  return `${JSON.stringify(lease, null, 2)}\n`;
+}
+
+// O_EXCL create: this is the claim. Returns false when someone already holds it.
+function claimLease(lease) {
+  validateLease(lease);
+  mkdirSync(leasesDirectory(), { recursive: true, mode: 0o700 });
+  let descriptor;
+  try {
+    descriptor = openSync(leasePath(lease.workspace), "wx", 0o600);
+    writeFileSync(descriptor, serializeLease(lease), "utf8");
+    fsyncSync(descriptor);
+    return true;
+  } catch (error) {
+    if (error?.code === "EEXIST") return false;
+    throw error;
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+// Only ever called by the process that already holds the lease, to record the
+// job id once the companion has returned it.
+function updateLease(lease) {
+  validateLease(lease);
+  const directory = leasesDirectory();
+  const destination = leasePath(lease.workspace);
+  const temporary = join(directory, `.${process.pid}.${Date.now()}.tmp`);
+  let descriptor;
+  try {
+    descriptor = openSync(temporary, "wx", 0o600);
+    writeFileSync(descriptor, serializeLease(lease), "utf8");
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    renameSync(temporary, destination);
+    syncDirectory(directory);
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+    if (existsSync(temporary)) unlinkSync(temporary);
+  }
+  return destination;
+}
+
+function removeLease(workspace) {
+  const file = leasePath(workspace);
+  if (existsSync(file)) unlinkSync(file);
+  syncDirectory(leasesDirectory());
+}
+
+// "terminal" requires proof: a recorded non-active status, or a report recovered
+// from the exact rollout. Absence of evidence is "unknown", never "terminal".
+function jobDisposition(jobId) {
+  if (!jobId || !SAFE_JOB_ID.test(jobId)) return { disposition: "unknown", status: null };
+  const found = locateJobs(jobId);
+  if (found.length === 1) {
+    const status = found[0].job.status ?? null;
+    if (ACTIVE.has(status)) return { disposition: "active", status };
+    if (status) return { disposition: "terminal", status };
+  }
+  if (found.length > 1) return { disposition: "unknown", status: null };
+  const stored = readReceipt(jobId);
+  if (stored.status === "valid"
+    && recoverRollout(stored.receipt.threadId, stored.receipt.turnId).ok) {
+    return { disposition: "terminal", status: "recovered-from-rollout" };
+  }
+  return { disposition: "unknown", status: null };
+}
+
+function mappingForJob(jobId) {
+  const stored = readReceipt(jobId);
+  if (stored.status === "valid") {
+    return {
+      threadId: stored.receipt.threadId,
+      turnId: stored.receipt.turnId,
+      receipt: receiptPath(jobId),
+    };
+  }
+  const [info] = locateJobs(jobId);
+  return {
+    threadId: info ? threadIdFor(info.job) : null,
+    turnId: info?.job.turnId ?? null,
+    receipt: null,
+  };
+}
+
 function sessionsDirectory() {
   return resolve(process.env.CODEX_DISPATCH_SESSIONS_DIR ?? join(homedir(), ".codex", "sessions"));
 }
@@ -430,18 +590,131 @@ function mappingsConflict(state, receipt) {
     || (state.workspace && resolve(state.workspace) !== resolve(receipt.workspace));
 }
 
+// Decide whether this attempt may start a job, without launching anything.
+// Returns either {proceed: true} -- the lease is now held by this attempt -- or
+// a refusal/reuse payload for the caller to print.
+function acquireLease(cwd, attempt) {
+  const existing = readLease(cwd);
+
+  if (existing.status === "invalid") {
+    return {
+      proceed: false,
+      exit: EXIT.CONFLICT,
+      payload: {
+        attempt,
+        workspace: cwd,
+        reason: "workspace-lease-invalid",
+        leaseError: existing.error,
+        hint: `Inspect ${leasePath(cwd)}, then run release --cwd ${cwd} once you know no job is writing.`,
+      },
+    };
+  }
+
+  if (existing.status === "valid") {
+    const held = existing.lease;
+    if (held.attempt === attempt) {
+      if (held.jobId) {
+        return { proceed: false, exit: 0, reuse: held };
+      }
+      // A previous run of this attempt claimed the lease and then died before it
+      // could record a job. It may or may not have launched one; we cannot tell.
+      return {
+        proceed: false,
+        exit: EXIT.CONFLICT,
+        payload: {
+          attempt,
+          workspace: cwd,
+          reason: "attempt-claimed-without-job",
+          hint: `A previous dispatch of this attempt did not record a job. Check for a running Codex task, then run release --cwd ${cwd}.`,
+        },
+      };
+    }
+
+    const { disposition, status } = jobDisposition(held.jobId);
+    if (disposition !== "terminal") {
+      return {
+        proceed: false,
+        exit: EXIT.CONFLICT,
+        payload: {
+          attempt,
+          workspace: cwd,
+          reason: disposition === "active" ? "workspace-lease-held" : "workspace-lease-unverifiable",
+          heldBy: { attempt: held.attempt, jobId: held.jobId, dispatchedAt: held.dispatchedAt },
+          jobStatus: status,
+          hint: disposition === "active"
+            ? `Poll or recover job ${held.jobId} first. Two write-capable jobs in one worktree interleave edits.`
+            : `Job ${held.jobId} left no state and no recoverable rollout, so it cannot be shown to have finished. Confirm it is gone, then run release --cwd ${cwd}.`,
+        },
+      };
+    }
+    removeLease(cwd);
+  }
+
+  const claimed = claimLease({
+    schemaVersion: 1,
+    attempt,
+    workspace: cwd,
+    jobId: null,
+    dispatchedAt: new Date().toISOString(),
+  });
+  if (!claimed) {
+    return {
+      proceed: false,
+      exit: EXIT.CONFLICT,
+      payload: {
+        attempt,
+        workspace: cwd,
+        reason: "workspace-lease-raced",
+        hint: "Another dispatch claimed this workspace at the same moment. Re-run to see who holds it.",
+      },
+    };
+  }
+  return { proceed: true };
+}
+
 async function dispatch(options) {
-  allowOnly(options, new Set(["cwd", "mode", "prompt-file"]));
+  allowOnly(options, new Set(["cwd", "mode", "prompt-file", "attempt"]));
   const cwd = resolve(required(options, "cwd"));
   const promptFile = resolve(required(options, "prompt-file"));
+  const attempt = required(options, "attempt");
   if (required(options, "mode") !== "fresh") throw new UsageError("--mode must be fresh.");
   if (!existsSync(cwd) || !statSync(cwd).isDirectory()) throw new Error(`Not a directory: ${cwd}`);
   if (!existsSync(promptFile)) throw new Error(`Prompt file does not exist: ${promptFile}`);
+
+  const gate = acquireLease(cwd, attempt);
+  if (!gate.proceed) {
+    if (gate.exit === EXIT.CONFLICT) return conflict(gate.payload);
+    const mapping = mappingForJob(gate.reuse.jobId);
+    return print({
+      jobId: gate.reuse.jobId,
+      threadId: mapping.threadId,
+      turnId: mapping.turnId,
+      receipt: mapping.receipt,
+      attempt,
+      reused: true,
+    });
+  }
+
   const args = ["task", "--background", "--write", "--fresh", "--cwd", cwd,
     "--prompt-file", promptFile, "--json"];
   const run = runCompanion(args);
-  if (run.status !== 0) throw new Error(run.stderr.trim() || "Companion dispatch failed.");
+  if (run.status !== 0) {
+    // Nothing was launched, so this attempt must not keep the workspace hostage.
+    removeLease(cwd);
+    throw new Error(run.stderr.trim() || "Companion dispatch failed.");
+  }
   const launched = JSON.parse(run.stdout);
+  // From here a job exists. Record it in the lease before anything else can
+  // fail, so a later failure leaves the workspace protected rather than open.
+  const leaseRecord = {
+    schemaVersion: 1,
+    attempt,
+    workspace: cwd,
+    jobId: launched.jobId,
+    dispatchedAt: new Date().toISOString(),
+  };
+  updateLease(leaseRecord);
+
   const deadline = Date.now() + 10000;
   let info;
   do {
@@ -453,7 +726,7 @@ async function dispatch(options) {
   } while (true);
   if (!info?.job.threadId || !info?.job.turnId) {
     throw new Error(
-      `Dispatched job ${launched.jobId}, but exact thread and turn identifiers were unavailable; no receipt was written.`,
+      `Dispatched job ${launched.jobId}, but exact thread and turn identifiers were unavailable; no receipt was written. The workspace lease is held by attempt ${attempt}; release it once you know the job's fate.`,
     );
   }
   const receipt = {
@@ -465,7 +738,60 @@ async function dispatch(options) {
     timestamp: info.job.createdAt ?? new Date().toISOString(),
   };
   const storedAt = writeReceipt(receipt);
-  print({ jobId: receipt.jobId, threadId: receipt.threadId, turnId: receipt.turnId, receipt: storedAt });
+  print({
+    jobId: receipt.jobId,
+    threadId: receipt.threadId,
+    turnId: receipt.turnId,
+    receipt: storedAt,
+    attempt,
+    reused: false,
+  });
+}
+
+function lease(options) {
+  allowOnly(options, new Set(["cwd"]));
+  const cwd = resolve(required(options, "cwd"));
+  const existing = readLease(cwd);
+  if (existing.status === "missing") {
+    return print({ workspace: cwd, held: false, lease: null, disposition: null, jobStatus: null });
+  }
+  if (existing.status === "invalid") {
+    return print({
+      workspace: cwd, held: true, lease: null, disposition: "unknown", jobStatus: null,
+      leaseError: existing.error,
+    });
+  }
+  const { disposition, status } = jobDisposition(existing.lease.jobId);
+  print({ workspace: cwd, held: true, lease: existing.lease, disposition, jobStatus: status });
+}
+
+function release(options) {
+  allowOnly(options, new Set(["cwd", "attempt"]));
+  const cwd = resolve(required(options, "cwd"));
+  const requested = options.attempt ?? null;
+  const existing = readLease(cwd);
+
+  if (existing.status === "missing") {
+    return print({ workspace: cwd, released: null, reason: "no-lease" });
+  }
+  if (existing.status === "invalid") {
+    removeLease(cwd);
+    return print({
+      workspace: cwd,
+      released: { attempt: null, jobId: null },
+      note: "The lease file was unreadable and has been removed.",
+    });
+  }
+  if (requested !== null && requested !== existing.lease.attempt) {
+    return conflict({
+      workspace: cwd,
+      reason: "attempt-mismatch",
+      requested,
+      heldBy: { attempt: existing.lease.attempt, jobId: existing.lease.jobId },
+    });
+  }
+  removeLease(cwd);
+  print({ workspace: cwd, released: existing.lease });
 }
 
 function poll(options) {
@@ -594,6 +920,8 @@ async function main() {
   if (command === "dispatch") return dispatch(options);
   if (command === "poll") return poll(options);
   if (command === "result") return result(options);
+  if (command === "lease") return lease(options);
+  if (command === "release") return release(options);
   throw new UsageError(`Unknown command: ${command}`);
 }
 

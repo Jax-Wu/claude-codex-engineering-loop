@@ -45,10 +45,14 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/controller.mjs" executor-packet --cwd "$PWD"
 3. Dispatch it through the native detached companion:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-dispatch.mjs" dispatch --cwd "$PWD" --mode fresh --prompt-file "<executorPacketPath>"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-dispatch.mjs" dispatch --cwd "$PWD" --mode fresh --prompt-file "<executorPacketPath>" --attempt "<runId>:EXECUTING:round-<fixRound>"
 ```
 
 Record the returned `jobId`, `threadId`, `turnId`, and receipt path. Before returning, the helper atomically stores the exact mapping under `~/.codex/engineering-loop/receipts`, outside companion-managed state. The helper uses the official companion's background mode; do not call raw Codex CLI or app-server commands. A foreground `--wait` is stripped before it reaches the companion and only exposes the reader to a 10-minute kill.
+
+Build `--attempt` from controller status only — `runId`, the phase, and `fixRound` — so the identical retry produces the identical string. Never add a timestamp, counter, or random suffix: the whole guard depends on a retry being recognisable as the same attempt. `reused: true` in the output means the job already existed and nothing new was started; treat it exactly like the original dispatch and go straight to polling.
+
+Before dispatching, the helper claims a write lease on the worktree. See [Workspace write lease](#workspace-write-lease) for what exit `6` means and what to do about it. Do not work around a refusal by inventing a new attempt id.
 
 Before dispatch, choose model and effort according to the executor contract's [Model and effort](executor-contract.md#model-and-effort) guidance. If either setting is omitted, it inherits the machine's global Codex configuration.
 
@@ -83,14 +87,52 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/controller.mjs" executor-packet --cwd "$PWD"
 2. Dispatch the complete fix packet as a fresh detached job:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-dispatch.mjs" dispatch --cwd "$PWD" --mode fresh --prompt-file "<fixPacketPath>"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-dispatch.mjs" dispatch --cwd "$PWD" --mode fresh --prompt-file "<fixPacketPath>" --attempt "<runId>:FIXING:round-<fixRound>"
 ```
 
-The fix packet and current worktree provide the continuation context. Never use `--resume` after an interruption or cancel: it yields `thread not found` and stalls at phase `starting`.
+The fix packet and current worktree provide the continuation context. Never use `--resume` after an interruption or cancel: it yields `thread not found` and stalls at phase `starting`. `fixRound` advances per repair round, so each round is a distinct attempt and takes the lease from the previous one once that job is terminal.
 
 3. Poll the job and retrieve its result with the same `poll` and `result` commands used in `EXECUTING`.
 4. Write the exact returned `report` string to `current.executionReportPath`.
 5. Run `execution-complete` with the returned job and thread IDs.
+
+### Workspace write lease
+
+One worktree holds one write-capable Codex job at a time, enforced by an
+O_EXCL claim under `~/.codex/engineering-loop/leases`, not by this document.
+
+`dispatch` exits `6` and starts nothing when the lease is held. Read `reason`:
+
+- `workspace-lease-held` — another attempt's job is still active. Poll or recover
+  that job (`poll --job`, then `result --job`) and let it finish. Two
+  write-capable jobs in one worktree interleave edits and the result is not
+  reviewable.
+- `workspace-lease-unverifiable` — the holding job left no companion state and no
+  recoverable rollout, so it cannot be *shown* to have finished. This refuses on
+  purpose. "No record" is not "dead" — that inversion is what produced the
+  2026-08-03 misdiagnosis.
+- `attempt-claimed-without-job` — a previous dispatch of this same attempt died
+  between claiming the lease and recording a job. It may have launched one.
+- `workspace-lease-invalid` / `workspace-lease-raced` — unreadable lease file, or
+  another dispatch claimed the workspace in the same instant.
+
+Inspect without changing anything:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-dispatch.mjs" lease --cwd "$PWD"
+```
+
+Release only after establishing that no job is writing — a `result` that returns
+a report, or a `poll` that reports terminal:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-dispatch.mjs" release --cwd "$PWD"
+```
+
+A terminal holder is reclaimed automatically on the next dispatch; `release` is
+for the cases the helper cannot verify. It is a human decision. Do not call it to
+clear a refusal you have not diagnosed, and never respond to exit `6` by
+generating a different attempt id.
 
 ### Stalled-job recovery
 

@@ -7,7 +7,7 @@ description: Resume an interrupted Claude–Codex engineering loop from persiste
 
 1. Read `${CLAUDE_PLUGIN_ROOT}/references/orchestration.md` completely.
 2. Run the controller `status` command before taking any action.
-3. Never create a new run and never start a duplicate Codex task. Use `${CLAUDE_PLUGIN_ROOT}/scripts/codex-dispatch.mjs` to poll or recover the recorded job before dispatching anything.
+3. Never create a new run and never start a duplicate Codex task. Use `${CLAUDE_PLUGIN_ROOT}/scripts/codex-dispatch.mjs` to poll or recover the recorded job before dispatching anything; `lease --cwd "$PWD"` shows whether a job still holds the worktree. Re-dispatching is safe only with the same `--attempt` string the interrupted phase used, which is why it is derived from `runId`, phase, and `fixRound` rather than generated.
 4. Resume according to the persisted phase:
    - `PLAN_APPROVAL`: treat `$ARGUMENTS` as approval only when it explicitly approves the displayed plan. Otherwise show the plan and wait.
    - `HUMAN_REQUIRED`: use `$ARGUMENTS` only as an explicit resolution. Do not invent product, migration, security, external-state, or authority decisions.

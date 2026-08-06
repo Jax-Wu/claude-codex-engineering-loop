@@ -6,10 +6,15 @@ Every packet must state the goal, approved plan or blocking findings, repository
 
 Use `scripts/codex-dispatch.mjs` for every Codex handoff:
 
-- dispatch initial work and repairs in native background mode with `dispatch --cwd <repo> --mode fresh --prompt-file <packet>`;
+- dispatch initial work and repairs in native background mode with `dispatch --cwd <repo> --mode fresh --prompt-file <packet> --attempt <id>`;
 - poll the returned job ID with `poll --job <id>`;
 - retrieve the final report with `result --job <id>`;
-- recover a known rollout directly with `result --thread <id>`, adding `--turn <id>` when the rollout contains more than one completed turn.
+- recover a known rollout directly with `result --thread <id>`, adding `--turn <id>` when the rollout contains more than one completed turn;
+- inspect or hand back the worktree's write lease with `lease --cwd <repo>` and `release --cwd <repo>`.
+
+`--attempt` identifies the phase attempt, never the job. Derive it from controller status alone (`runId`, phase, `fixRound`) so a retry produces the same string, and re-dispatching returns the existing job with `reused: true` instead of starting a second one. A timestamp or random suffix defeats the guard entirely.
+
+Exactly one write-capable job per worktree is enforced by an O_EXCL lease claim, not by this contract's wording — the 2026-08-03 double dispatch happened while the wording already said "exactly one". `dispatch` exits `6` without launching anything when another attempt holds the lease, and refuses rather than guessing when the holder's fate cannot be established. Never answer exit `6` by changing the attempt id.
 
 The helper launches the official companion as a detached, write-capable task and returns without waiting for the turn. Before returning, it atomically writes an independent job-to-thread receipt under `~/.codex/engineering-loop/receipts`. The receipt records the exact job, thread, turn, workspace, and dispatch timestamp, and is not stored in companion-managed state.
 

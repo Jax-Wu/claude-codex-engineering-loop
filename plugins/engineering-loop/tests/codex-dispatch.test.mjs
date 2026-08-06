@@ -28,6 +28,7 @@ function runDispatcher(args, fixture, extraEnv = {}) {
       ...process.env,
       CODEX_DISPATCH_SESSIONS_DIR: fixture.sessions,
       CODEX_DISPATCH_RECEIPTS_DIR: fixture.receipts,
+      CODEX_DISPATCH_LEASES_DIR: fixture.leases,
       ...extraEnv,
     },
   });
@@ -67,6 +68,7 @@ function makeFixture() {
     root: fixtureRoot,
     sessions: join(fixtureRoot, "sessions"),
     receipts: join(fixtureRoot, "receipts"),
+    leases: join(fixtureRoot, "leases"),
   };
   writeRollout(fixture, THREAD_ONE, "2026-08-03T07:27:21.990Z", [
     { turnId: TURN_ONE, report: "single exact report" },
@@ -185,12 +187,14 @@ process.stdout.write(JSON.stringify({ jobId: "${jobId}" }));
 `, "utf8");
 
   const result = runDispatcher(
-    ["dispatch", "--cwd", fixture.root, "--mode", "fresh", "--prompt-file", prompt],
+    ["dispatch", "--cwd", fixture.root, "--mode", "fresh", "--prompt-file", prompt,
+      "--attempt", "run-fixture:round-0:execute"],
     fixture,
     { CLAUDE_PLUGIN_DATA: pluginData, CODEX_COMPANION_PATH: companion },
   );
   assert.equal(result.status, 0, result.stderr);
   const output = JSON.parse(result.stdout);
+  assert.equal(output.reused, false);
   const receipt = JSON.parse(readFileSync(output.receipt, "utf8"));
   assert.deepEqual(receipt, {
     schemaVersion: 1,
