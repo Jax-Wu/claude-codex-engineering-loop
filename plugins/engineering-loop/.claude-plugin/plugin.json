@@ -1,6 +1,6 @@
 {
   "name": "engineering-loop",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Claude plans, Codex implements, Claude reviews, and Codex repairs in a bounded, recoverable loop.",
   "author": {
     "name": "Engineering Loop Maintainers"

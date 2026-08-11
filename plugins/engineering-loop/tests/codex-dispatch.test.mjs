@@ -205,3 +205,103 @@ process.stdout.write(JSON.stringify({ jobId: "${jobId}" }));
     timestamp: "2026-08-03T09:00:00.000Z",
   });
 });
+
+// ── poll liveness ────────────────────────────────────────────────────────────
+// The 2026-08-11 incident: a rescue job died between "thread ready" and any
+// agent output. Companion state kept `status: running, phase: starting` with a
+// pid that no longer existed, and poll answered "still active" forever, so the
+// reader waited on a corpse. Silence is the failure mode these cover.
+
+function writeJob(fixture, job) {
+  const stateRoot = join(fixture.root, "plugin-data", "state", "workspace", "jobs");
+  mkdirSync(stateRoot, { recursive: true });
+  writeFileSync(join(stateRoot, `${job.id}.json`), JSON.stringify(job), "utf8");
+  return { CLAUDE_PLUGIN_DATA: join(fixture.root, "plugin-data") };
+}
+
+function writeLog(fixture, name, secondsAgo) {
+  const file = join(fixture.root, `${name}.log`);
+  const at = new Date(Date.now() - secondsAgo * 1000).toISOString();
+  writeFileSync(file, `[${at}] Turn started (t).\n`, "utf8");
+  return file;
+}
+
+function deadPid() {
+  // A pid that is real enough to look plausible but is certainly gone: spawn a
+  // trivial child, wait for it, then reuse its number.
+  const done = spawnSync(process.execPath, ["-e", ""], { encoding: "utf8" });
+  return done.pid;
+}
+
+test("poll flags a dead reader even when the phase never reached running", (t) => {
+  const fixture = makeFixture();
+  t.after(() => rmSync(fixture.root, { recursive: true, force: true }));
+  const env = writeJob(fixture, {
+    id: "task-dead-starting",
+    status: "running",
+    phase: "starting",
+    pid: deadPid(),
+    logFile: writeLog(fixture, "dead-starting", 900),
+  });
+  const result = runDispatcher(["poll", "--job", "task-dead-starting"], fixture, env);
+  assert.equal(result.status, 4, result.stdout + result.stderr);
+  assert.equal(JSON.parse(result.stdout).likelyDetached, true);
+});
+
+test("poll flags a stalled job whose phase is still starting", (t) => {
+  const fixture = makeFixture();
+  t.after(() => rmSync(fixture.root, { recursive: true, force: true }));
+  const env = writeJob(fixture, {
+    id: "task-stalled-starting",
+    status: "running",
+    phase: "starting",
+    logFile: writeLog(fixture, "stalled-starting", 900),
+  });
+  const result = runDispatcher(["poll", "--job", "task-stalled-starting"], fixture, env);
+  assert.equal(result.status, 4, result.stdout + result.stderr);
+});
+
+test("poll leaves a live, recently-chatty job alone", (t) => {
+  const fixture = makeFixture();
+  t.after(() => rmSync(fixture.root, { recursive: true, force: true }));
+  const env = writeJob(fixture, {
+    id: "task-healthy",
+    status: "running",
+    phase: "running",
+    pid: process.pid,
+    logFile: writeLog(fixture, "healthy", 5),
+  });
+  const result = runDispatcher(["poll", "--job", "task-healthy"], fixture, env);
+  assert.equal(result.status, 3, result.stdout + result.stderr);
+  assert.equal(JSON.parse(result.stdout).likelyDetached, false);
+});
+
+test("a live pid keeps a quiet job active, so long thinking is not killed", (t) => {
+  // The false positive that would matter most: Codex reasoning for minutes with
+  // nothing to log. Liveness must beat the log-silence heuristic here.
+  const fixture = makeFixture();
+  t.after(() => rmSync(fixture.root, { recursive: true, force: true }));
+  const env = writeJob(fixture, {
+    id: "task-quiet-alive",
+    status: "running",
+    phase: "running",
+    pid: process.pid,
+    logFile: writeLog(fixture, "quiet-alive", 900),
+  });
+  const result = runDispatcher(["poll", "--job", "task-quiet-alive"], fixture, env);
+  assert.equal(result.status, 3, result.stdout + result.stderr);
+});
+
+test("a terminal job is never reported as detached", (t) => {
+  const fixture = makeFixture();
+  t.after(() => rmSync(fixture.root, { recursive: true, force: true }));
+  const env = writeJob(fixture, {
+    id: "task-done",
+    status: "completed",
+    phase: "running",
+    pid: deadPid(),
+    logFile: writeLog(fixture, "done", 900),
+  });
+  const result = runDispatcher(["poll", "--job", "task-done"], fixture, env);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});

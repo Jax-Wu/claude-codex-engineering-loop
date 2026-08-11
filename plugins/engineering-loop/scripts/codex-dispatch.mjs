@@ -22,6 +22,10 @@ const EXIT = Object.freeze({
   ERROR: 1, USAGE: 2, ACTIVE: 3, DETACHED: 4, NO_RESULT: 5, CONFLICT: 6,
 });
 const ACTIVE = new Set(["queued", "running"]);
+// Healthy turns have been observed to go at most ~69s between log events, so
+// 120s is silence a live reader should not produce. Only consulted when the
+// record carries no pid to check.
+const STALL_SECONDS = 120;
 const SAFE_JOB_ID = /^[a-zA-Z0-9._-]+$/u;
 const TIMESTAMPED_JOB_ID = /^task-([a-z0-9]+)-[a-z0-9]+$/iu;
 const ROLLOUT_ID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu;
@@ -153,6 +157,49 @@ function lastLogEvent(logFile) {
   return {
     at,
     seconds: Number.isFinite(time) ? Math.max(0, Math.floor((Date.now() - time) / 1000)) : null,
+  };
+}
+
+// Signal 0 asks the kernel whether the pid exists without touching it. ESRCH is
+// the only answer that means "gone"; EPERM means it exists under another user.
+// Returns null when the record predates pid tracking, so callers can tell
+// "no evidence" apart from "evidence of death".
+function processAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+// Whether the reader should stop waiting on this job.
+//
+// Two independent signals, because each one alone has a blind spot:
+//   * a recorded pid that no longer exists is proof the reader died -- it does
+//     not care what phase label the record froze at, which is what the old
+//     `phase === "running"` gate got wrong (2026-08-11: a job died at phase
+//     `starting`, so poll answered ACTIVE forever and the caller waited on a
+//     corpse);
+//   * log silence catches the cases pid alone cannot -- no pid recorded, or a
+//     pid number recycled by an unrelated process.
+//
+// A live pid outranks silence: Codex can reason for minutes with nothing to
+// log, and killing that is worse than waiting through it.
+function assessLiveness(job, last, { stallSeconds = STALL_SECONDS } = {}) {
+  const phase = job.phase ?? job.status ?? "unknown";
+  const active = ACTIVE.has(job.status);
+  const alive = processAlive(job.pid);
+  const silentFor = last.seconds;
+  const stalled = silentFor !== null && silentFor > stallSeconds;
+  const readerGone = alive === false;
+  return {
+    phase,
+    alive,
+    lastEventAt: last.at,
+    secondsSinceLastEvent: silentFor,
+    likelyDetached: active && (readerGone || (alive === null && stalled)),
   };
 }
 
@@ -797,11 +844,9 @@ function release(options) {
 function poll(options) {
   allowOnly(options, new Set(["job"]));
   const { job } = findJob(required(options, "job"));
-  const last = lastLogEvent(job.logFile);
-  const phase = job.phase ?? job.status ?? "unknown";
-  const likelyDetached = phase === "running" && last.seconds !== null && last.seconds > 120;
-  print({ phase, lastEventAt: last.at, secondsSinceLastEvent: last.seconds, likelyDetached });
-  if (likelyDetached) process.exitCode = EXIT.DETACHED;
+  const assessment = assessLiveness(job, lastLogEvent(job.logFile));
+  print(assessment);
+  if (assessment.likelyDetached) process.exitCode = EXIT.DETACHED;
   else if (ACTIVE.has(job.status)) process.exitCode = EXIT.ACTIVE;
   else if (job.status !== "completed") process.exitCode = EXIT.NO_RESULT;
 }

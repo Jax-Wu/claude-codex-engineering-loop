@@ -136,7 +136,14 @@ generating a different attempt id.
 
 ### Stalled-job recovery
 
-Do not cancel a job merely because its log stopped. Use the log's last-event timestamp as the liveness signal: healthy turns have observed gaps no longer than about 69 seconds, while more than 120 seconds at phase `running` means "no reader attached," not "dead."
+Do not cancel a job merely because its log stopped. `poll` decides with two independent signals, and reports both so you can see which one fired:
+
+- `alive` — whether the recorded pid still exists. `false` is proof the reader died and is enough on its own, whatever `phase` the record froze at. `null` means the record predates pid tracking, not that the job is healthy.
+- `secondsSinceLastEvent` — log silence. Healthy turns have observed gaps no longer than about 69 seconds, so more than 120 seconds is silence a live reader should not produce. Only consulted when `alive` is `null`, because Codex can reason for minutes with nothing to log and killing that is worse than waiting through it.
+
+Neither signal is read for a job whose status is already terminal.
+
+⚠ Do not narrow either check to a single `phase` value. The 2026-08-11 stall died at phase `starting`, so a guard written only for phase `running` answered "still active" indefinitely and the reader waited on a corpse. Guard the symptom, not the one route you have already seen.
 
 Before cancelling, run `result --job <id>`. It checks companion state, then the independently stored receipt, and uses the exact thread and turn mapping to find `payload.type == "task_complete"` in the rollout. The returned `payload.last_agent_message` is the execution report.
 
